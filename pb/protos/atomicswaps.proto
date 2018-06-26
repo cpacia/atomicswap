@@ -1,0 +1,28 @@
+syntax = "proto3";
+option go_package = "pb";
+
+import "google/protobuf/timestamp.proto";
+
+message SignedLimitOrder {
+    bytes serializedLimitOrder = 1;
+    bytes signature            = 2;
+}
+
+message LimitOrder {
+    string peerID                     = 1;
+    bool buyBTC                       = 2;
+    uint64 quantity                   = 3;
+    uint64 price                      = 4;
+    SignedUTXO utxo                   = 5;
+    google.protobuf.Timestamp expiry  = 6;
+
+    message SignedUTXO {
+        bytes outpoint  = 1; // hash:index
+        bytes signature = 2;
+    }
+}
+
+message SignedRemoveOrder {
+    string orderID = 1;
+    bytes signature =2;
+}

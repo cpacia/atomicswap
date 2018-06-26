@@ -3,16 +3,18 @@ package cmd
 import (
 	"context"
 	"errors"
+	api2 "github.com/cpacia/atomicswap/api"
+	"github.com/cpacia/atomicswap/core"
 	"github.com/cpacia/atomicswap/net"
-	"github.com/cpacia/atomicswap/repo"
-	"github.com/libp2p/go-floodsub"
+	r "github.com/cpacia/atomicswap/repo"
+	fs "github.com/libp2p/go-floodsub"
 	"github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p-kad-dht/opts"
 	"github.com/libp2p/go-libp2p-protocol"
 	"github.com/libp2p/go-libp2p-record"
 	"github.com/op/go-logging"
 	"os"
-	"sync"
+	"github.com/cpacia/atomicswap/net/service"
 )
 
 var stdoutLogFormat = logging.MustStringFormatter(
@@ -24,13 +26,14 @@ var log = logging.MustGetLogger("cmd")
 type Start struct {
 	DataDir string `short:"d" long:"datadir" description:"specify the data directory to be used"`
 	Port    int    `short:"p" long:"port" description:"the port to use" default:"0"`
+	APIPort int    `short:"a" long:"apiport" description:"the json API port to use" default:"0"`
 }
 
 // The start command will start up our atomic swap node, connect to the p2p network, and download the order book, and initialize the API
 func (x *Start) Execute(args []string) error {
 	// First create our repo which is where we'll store or app related data
 	// This will also create and save our node's identity private key if it does not yet exist
-	r, err := repo.NewRepo(x.DataDir)
+	repo, err := r.NewRepo(x.DataDir)
 	if err != nil {
 		return err
 	}
@@ -40,6 +43,9 @@ func (x *Start) Execute(args []string) error {
 	if x.Port == 0 {
 		return errors.New("You must specify a port when starting up. Use the -p flag.")
 	}
+	if x.APIPort == 0 {
+		return errors.New("You must specify an API port when starting up. Use the -a flag.")
+	}
 
 	// Set up logging
 	backendStdout := logging.NewLogBackend(os.Stdout, "", 0)
@@ -48,13 +54,13 @@ func (x *Start) Execute(args []string) error {
 
 	// Build our host. This is the core of libp2p. We're going to initialize it with with the default
 	// transports, muxers, security, and peerstore.
-	peerHost, err := net.NewPeerHost(x.Port, r)
+	peerHost, err := net.NewPeerHost(x.Port, repo)
 	if err != nil {
 		return err
 	}
 
 	// Create our pubsub implementation. Floodsub is a flooding pubsub system that we'll use for our orderbook.
-	_, err = floodsub.NewFloodsubWithProtocols(context.Background(), peerHost, []protocol.ID{net.FloodSubID})
+	floodsub, err := fs.NewFloodsubWithProtocols(context.Background(), peerHost, []protocol.ID{net.FloodSubID})
 	if err != nil {
 		return err
 	}
@@ -67,22 +73,28 @@ func (x *Start) Execute(args []string) error {
 	// Create the dht instance. It needs the host and a datastore instance
 	routing, err := dht.New(
 		context.Background(), peerHost,
-		dhtopts.Datastore(r.Datastore()),
+		dhtopts.Datastore(repo.Datastore()),
 		dhtopts.Validator(validator),
 	)
 
 	// Finally let's bootstrap everything and get us up and running
-	err = net.Bootstrap(routing, peerHost, net.BootstrapConfigWithPeers(r.BootstrapPeers()))
-
+	err = net.Bootstrap(routing, peerHost, net.BootstrapConfigWithPeers(repo.BootstrapPeers()))
 	if err != nil {
 		return err
 	}
 
-	// Now we're listening let's just hang out here.
-	log.Infof("Listening on %s, peerID: %s\n", peerHost.Addrs()[0], peerHost.ID().Pretty())
-	var wg sync.WaitGroup
-	wg.Add(1)
-	wg.Wait()
+	node := core.NewAtomicSwapNode(repo, peerHost, routing, floodsub)
+	node.StartOnlineServices()
 
+	ws := service.NewWireService(node.MsgChan(), node.OrderBook(), peerHost)
+	node.SetWireService(ws)
+
+
+	log.Infof("Listening on %s, peerID: %s\n", peerHost.Addrs()[0], peerHost.ID().Pretty())
+
+	jsonAPI := api2.NewAPIServer(node)
+	jsonAPI.Serve(x.APIPort)
+
+	// Now we're listening let's just hang out here.
 	return nil
 }
