@@ -8,7 +8,11 @@ import (
 	"github.com/gorilla/mux"
 	"net/http"
 	"strconv"
+	"path"
+	"github.com/op/go-logging"
 )
+
+var log = logging.MustGetLogger("jsonapi")
 
 type APIServer struct {
 	node   *core.AtomicSwapNode
@@ -21,6 +25,7 @@ func NewAPIServer(node *core.AtomicSwapNode) *APIServer {
 		router: mux.NewRouter(),
 	}
 	s.router.HandleFunc("/limitorder", s.handleLimitOrder).Methods("POST")
+	s.router.PathPrefix("/closeorder").Methods("POST").Handler(http.HandlerFunc(s.handleCloseOrder))
 	s.router.HandleFunc("/orderbook", s.handleOrderBook).Methods("GET")
 	return s
 }
@@ -44,6 +49,16 @@ func (a *APIServer) handleLimitOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	err = a.node.PublishLimitOrder(o.Quantity, o.Price, o.BuyBTC)
 	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
+func (a *APIServer) handleCloseOrder(w http.ResponseWriter, r *http.Request) {
+	_, orderID := path.Split(r.URL.Path)
+	err := a.node.CloseOrder(orderID)
+	if err != nil {
+		log.Error(err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}

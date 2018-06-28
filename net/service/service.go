@@ -114,7 +114,7 @@ func (ws *WireService) handlerForMsgType(t pb.Message_MessageType) func(peer.ID,
 }
 
 func (ws *WireService) handleLimitOrder(p peer.ID, msg *pb.Message) (*pb.Message, error) {
-	ws.orderBook.ProcessNewLimitOrder(msg.Payload.Value)
+	ws.orderBook.ProcessNewLimitOrder(msg.Payload.Value, false)
 	return nil, nil
 }
 

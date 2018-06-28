@@ -6,6 +6,7 @@ import (
 	api2 "github.com/cpacia/atomicswap/api"
 	"github.com/cpacia/atomicswap/core"
 	"github.com/cpacia/atomicswap/net"
+	"github.com/cpacia/atomicswap/net/service"
 	r "github.com/cpacia/atomicswap/repo"
 	fs "github.com/libp2p/go-floodsub"
 	"github.com/libp2p/go-libp2p-kad-dht"
@@ -14,7 +15,6 @@ import (
 	"github.com/libp2p/go-libp2p-record"
 	"github.com/op/go-logging"
 	"os"
-	"github.com/cpacia/atomicswap/net/service"
 )
 
 var stdoutLogFormat = logging.MustStringFormatter(
@@ -88,7 +88,6 @@ func (x *Start) Execute(args []string) error {
 
 	ws := service.NewWireService(node.MsgChan(), node.OrderBook(), peerHost)
 	node.SetWireService(ws)
-
 
 	log.Infof("Listening on %s, peerID: %s\n", peerHost.Addrs()[0], peerHost.ID().Pretty())
 

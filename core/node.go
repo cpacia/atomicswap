@@ -3,9 +3,10 @@ package core
 import (
 	"context"
 	"crypto/sha256"
+	"github.com/cpacia/atomicswap/net/service"
+	ob "github.com/cpacia/atomicswap/orderbook"
 	"github.com/cpacia/atomicswap/pb"
 	r "github.com/cpacia/atomicswap/repo"
-	ob "github.com/cpacia/atomicswap/orderbook"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/ipfs/go-cid"
@@ -19,7 +20,7 @@ import (
 	"io"
 	"sync"
 	"time"
-	"github.com/cpacia/atomicswap/net/service"
+	"errors"
 )
 
 var (
@@ -56,10 +57,12 @@ type removePeer struct {
 
 type newOrder struct {
 	serializedMessage []byte
+	mine bool
 }
 
 type closeOrder struct {
 	serializedMessage []byte
+	mine bool
 }
 
 // This struct contains the relevant components of our node that we'll need
@@ -119,9 +122,9 @@ func (n *AtomicSwapNode) messageHandler() {
 					delete(n.connectedSubs, msg.peerID)
 				}
 			case newOrder:
-				n.orderBook.ProcessNewLimitOrder(msg.serializedMessage)
+				n.orderBook.ProcessNewLimitOrder(msg.serializedMessage, msg.mine)
 			case closeOrder:
-				n.orderBook.ProcessCloseOrder(msg.serializedMessage)
+				n.orderBook.ProcessCloseOrder(msg.serializedMessage, msg.mine)
 			}
 		}
 	}
@@ -159,7 +162,7 @@ func (n *AtomicSwapNode) PublishLimitOrder(quantity, price uint64, buyBTC bool) 
 	if err != nil {
 		return err
 	}
-	n.msgChan <- newOrder{serializedMessage: serializedWithSig}
+	n.msgChan <- newOrder{serializedMessage: serializedWithSig, mine: true}
 	any, err := ptypes.MarshalAny(signed)
 	if err != nil {
 		return err
@@ -175,6 +178,42 @@ func (n *AtomicSwapNode) PublishLimitOrder(quantity, price uint64, buyBTC bool) 
 	return n.floodsub.Publish("OrderBook", serializedMessage)
 }
 
+func (n *AtomicSwapNode) CloseOrder(orderID string) error {
+	_, mine, err := n.orderBook.GetOrder(orderID)
+	if err != nil {
+		return err
+	}
+	if !mine {
+		return errors.New("order is not owned by this node")
+	}
+	sig, err := n.repo.PrivKey().Sign([]byte(orderID))
+	if err != nil {
+		return err
+	}
+	cpb := &pb.SignedRemoveOrder{
+		OrderID: orderID,
+		Signature: sig,
+	}
+	serializedWithSig, err := proto.Marshal(cpb)
+	if err != nil {
+		return err
+	}
+	n.msgChan <- closeOrder{serializedMessage: serializedWithSig, mine: true}
+	any, err := ptypes.MarshalAny(cpb)
+	if err != nil {
+		return err
+	}
+	m := &pb.Message{
+		MessageType: pb.Message_OrderClose,
+		Payload:     any,
+	}
+	serializedMessage, err := proto.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return n.floodsub.Publish("OrderBook", serializedMessage)
+
+}
 func (n *AtomicSwapNode) subscribeTopic() {
 	go n.setSelfAsSubscriber()
 
@@ -220,11 +259,8 @@ func (n *AtomicSwapNode) setSelfAsSubscriber() {
 
 	// We'll do this repeatedly to make sure we stay subscribed and our subscription does not expire
 	ticker := time.NewTicker(ReSubscribeInterval)
-	for {
-		select {
-		case <-ticker.C:
-			subscribe()
-		}
+	for range ticker.C {
+		subscribe()
 	}
 }
 
@@ -232,18 +268,15 @@ func (n *AtomicSwapNode) setSelfAsSubscriber() {
 func (n *AtomicSwapNode) connectToSubscribers() {
 	n.connectionRound()
 	ticker := time.NewTicker(ReconnectInterval)
-	for {
-		select {
-		case <-ticker.C:
-			for peer := range n.connectedSubs {
-				conns:= n.peerHost.Network().ConnsToPeer(peer)
-				if len(conns) == 0 {
-					n.msgChan <- removePeer{peer}
-				}
+	for range ticker.C {
+		for peer := range n.connectedSubs {
+			conns := n.peerHost.Network().ConnsToPeer(peer)
+			if len(conns) == 0 {
+				n.msgChan <- removePeer{peer}
 			}
-			if len(n.connectedSubs) < MinConnectedSubscribers {
-				n.connectionRound()
-			}
+		}
+		if len(n.connectedSubs) < MinConnectedSubscribers {
+			n.connectionRound()
 		}
 	}
 }

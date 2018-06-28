@@ -8,9 +8,13 @@ import (
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p-peer"
 	"github.com/multiformats/go-multihash"
-	"time"
 	"github.com/op/go-logging"
+	"sync"
+	"time"
+	"errors"
 )
+
+const GarbageCollectionInterval = time.Minute
 
 var log = logging.MustGetLogger("orderbook")
 
@@ -51,13 +55,36 @@ func (lo *LimitOrder) SignedLimitOrder() (*pb.SignedLimitOrder, error) {
 
 type OrderBook struct {
 	orders map[string]LimitOrder
+	myOrders map[string]LimitOrder
+	lock   sync.Mutex
 }
 
 func NewOrderBook() *OrderBook {
-	return &OrderBook{make(map[string]LimitOrder)}
+	ob := &OrderBook{make(map[string]LimitOrder), make(map[string]LimitOrder),sync.Mutex{}}
+	go ob.removeExpired()
+	return ob
+}
+
+func (ob *OrderBook) removeExpired() {
+	ticker := time.NewTicker(GarbageCollectionInterval)
+	for range ticker.C {
+		ob.lock.Lock()
+		defer ob.lock.Unlock()
+		for oid, order := range ob.orders {
+			t, err := ptypes.Timestamp(order.Expiry)
+			if err != nil {
+				continue
+			}
+			if t.Before(time.Now()) {
+				delete(ob.orders, oid)
+			}
+		}
+	}
 }
 
 func (ob *OrderBook) OpenOrders() []LimitOrder {
+	ob.lock.Lock()
+	defer ob.lock.Unlock()
 	var orders []LimitOrder
 	for _, o := range ob.orders {
 		orders = append(orders, o)
@@ -65,8 +92,25 @@ func (ob *OrderBook) OpenOrders() []LimitOrder {
 	return orders
 }
 
+func (ob *OrderBook) GetOrder(orderID string) (LimitOrder, bool, error) {
+	ob.lock.Lock()
+	defer ob.lock.Unlock()
+	order, ok := ob.orders[orderID]
+	var mine bool
+	if !ok {
+		order, ok = ob.myOrders[orderID]
+		if !ok {
+			return LimitOrder{}, false, errors.New("not found")
+		}
+		mine = true
+	}
+	return order, mine, nil
+}
+
 // Maybe add a new order to our order book
-func (ob *OrderBook) ProcessNewLimitOrder(serializedOrder []byte) {
+func (ob *OrderBook) ProcessNewLimitOrder(serializedOrder []byte, myOrder bool) {
+	ob.lock.Lock()
+	defer ob.lock.Unlock()
 	// Deserialized signed order
 	signed := new(pb.SignedLimitOrder)
 	err := proto.Unmarshal(serializedOrder, signed)
@@ -126,10 +170,15 @@ func (ob *OrderBook) ProcessNewLimitOrder(serializedOrder []byte) {
 	// If we made it this far lets add it to our orderbook
 	log.Infof("Added order: %s to order book", id.String())
 	ob.orders[id.String()] = lo
+	if myOrder {
+		ob.myOrders[id.String()] = lo
+	}
 }
 
 // Maybe remove an order from our orderbook
-func (ob *OrderBook) ProcessCloseOrder(serializedOrder []byte) {
+func (ob *OrderBook) ProcessCloseOrder(serializedOrder []byte, myOrder bool) {
+	ob.lock.Lock()
+	defer ob.lock.Unlock()
 	// Deserialized signed order
 	signed := new(pb.SignedRemoveOrder)
 	err := proto.Unmarshal(serializedOrder, signed)
@@ -169,4 +218,7 @@ func (ob *OrderBook) ProcessCloseOrder(serializedOrder []byte) {
 	// If we made it this far we can remove the order from the orderbook
 	log.Infof("Removed order: %s from order book", id.String())
 	delete(ob.orders, id.String())
+	if myOrder {
+		delete(ob.orders, id.String())
+	}
 }
